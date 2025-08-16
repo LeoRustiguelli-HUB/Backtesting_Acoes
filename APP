@@ -1,0 +1,135 @@
+import streamlit as st
+import pandas as pd
+import plotly.graph_objects as go
+from datetime import date
+
+from indicadores.tecnicos import get_stock_data
+from indicadores.estrategias import (
+    apply_crossover_strategy,
+    bollinger_breakout_strategy,
+    rsi_macd_strategy,
+)
+from utils.performance import calculate_performance_metrics, apply_stop_loss_take_profit
+from utils.relatorios import gerar_relatorio_pdf, gerar_relatorio_docx
+
+
+st.set_page_config(page_title="Backtest B3", layout="wide")
+st.title("📈 Backtest de Estratégias - B3")
+
+
+def executar_estrategia(df: pd.DataFrame, estrategia: str, sma_fast: int, sma_slow: int) -> pd.DataFrame:
+    """Aplica a estratégia selecionada ao DataFrame."""
+    match estrategia:
+        case "Cruzamento de Médias":
+            return apply_crossover_strategy(df, f"SMA_{sma_fast}", f"SMA_{sma_slow}")
+        case "Breakout Bollinger":
+            return bollinger_breakout_strategy(df)
+        case "RSI + MACD":
+            return rsi_macd_strategy(df)
+        case _:
+            raise ValueError(f"Estratégia desconhecida: {estrategia}")
+
+
+def plotar_resultados(df: pd.DataFrame, ticker: str, sma_fast: int, sma_slow: int) -> go.Figure:
+    """Gera gráfico com preço, médias móveis e sinais de compra/venda."""
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=df.index, y=df["Close"], name="Preço", line=dict(color="black")))
+
+    for sma in [sma_fast, sma_slow]:
+        col = f"SMA_{sma}"
+        if col in df.columns:
+            fig.add_trace(go.Scatter(x=df.index, y=df[col], name=f"SMA {sma}"))
+
+    buy, sell = df[df["Signal"] == 1], df[df["Signal"] == -1]
+    fig.add_trace(go.Scatter(x=buy.index, y=buy["Close"], mode="markers",
+                             marker_symbol="triangle-up", marker_color="green", name="Compra"))
+    fig.add_trace(go.Scatter(x=sell.index, y=sell["Close"], mode="markers",
+                             marker_symbol="triangle-down", marker_color="red", name="Venda"))
+
+    fig.update_layout(title=f"{ticker} - Sinais de Compra/Venda", xaxis_title="Data", yaxis_title="Preço")
+    return fig
+
+
+def gerar_relatorios(df: pd.DataFrame, ticker: str, estrategia: str,
+                     sma_fast: int, sma_slow: int, stop_loss: float, take_profit: float,
+                     start_date: date, end_date: date, metrics: dict, fig: go.Figure) -> None:
+    """Cria botões de download para relatórios PDF e DOCX."""
+    parametros = {
+        "Ticker": ticker,
+        "Estratégia": estrategia,
+        "SMA Curta": sma_fast,
+        "SMA Longa": sma_slow,
+        "Stop Loss": f"{stop_loss*100:.1f}%",
+        "Take Profit": f"{take_profit*100:.1f}%",
+        "Período": f"{start_date} a {end_date}"
+    }
+
+    colpdf, coldocx = st.columns(2)
+    with colpdf:
+        if st.button(f"📥 PDF - {ticker}"):
+            caminho_pdf = gerar_relatorio_pdf(ticker, df, metrics, fig, parametros)
+            with open(caminho_pdf, "rb") as f:
+                st.download_button("Baixar PDF", f, file_name=f"relatorio_{ticker}.pdf")
+
+    with coldocx:
+        if st.button(f"📥 DOCX - {ticker}"):
+            caminho_docx = gerar_relatorio_docx(ticker, df, metrics, fig, parametros)
+            with open(caminho_docx, "rb") as f:
+                st.download_button("Baixar DOCX", f, file_name=f"relatorio_{ticker}.docx")
+
+
+# ===========================
+# Interface Streamlit
+# ===========================
+
+tickers = st.multiselect(
+    "Selecione os ativos",
+    ["PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA"],
+    default=["PETR4.SA"],
+)
+
+start_date = st.date_input("Data inicial", value=date(2022, 1, 1))
+end_date = st.date_input("Data final", value=date.today())
+
+estrategia = st.selectbox("Estratégia", ["Cruzamento de Médias", "Breakout Bollinger", "RSI + MACD"])
+
+col1, col2 = st.columns(2)
+sma_fast = col1.number_input("SMA Curta", 1, 100, 20)
+sma_slow = col2.number_input("SMA Longa", 1, 200, 50)
+
+col3, col4 = st.columns(2)
+stop_loss = col3.slider("Stop Loss (%)", 0.0, 20.0, 5.0) / 100
+take_profit = col4.slider("Take Profit (%)", 0.0, 50.0, 10.0) / 100
+
+resultados: list[tuple[str, pd.DataFrame, dict[str, float]]] = []
+
+if st.button("🚀 Executar Backtest"):
+    for ticker in tickers:
+        df = get_stock_data(ticker, str(start_date), str(end_date), sma_periods=[sma_fast, sma_slow])
+        if df is None:
+            st.warning(f"Não foi possível carregar dados para {ticker}")
+            continue
+
+        df = executar_estrategia(df, estrategia, sma_fast, sma_slow)
+        df = apply_stop_loss_take_profit(df, stop_loss, take_profit)
+        metrics = calculate_performance_metrics(df)
+
+        resultados.append((ticker, df, metrics))
+
+        st.subheader(f"📊 Resultados para {ticker}")
+        st.write(metrics)
+
+        fig = plotar_resultados(df, ticker, sma_fast, sma_slow)
+        st.plotly_chart(fig, use_container_width=True)
+
+        with st.expander("📄 Relatórios"):
+            gerar_relatorios(df, ticker, estrategia, sma_fast, sma_slow, stop_loss, take_profit,
+                             start_date, end_date, metrics, fig)
+
+    if resultados:
+        ranking = pd.DataFrame(
+            [{"Ativo": t, **m} for t, _, m in resultados]
+        ).sort_values(by="Retorno Acumulado (%)", ascending=False)
+
+        st.subheader("🏆 Ranking de Ativos")
+        st.dataframe(ranking.reset_index(drop=True))
