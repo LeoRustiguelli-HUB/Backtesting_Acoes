@@ -1,0 +1,68 @@
+import yfinance as yf
+import pandas as pd
+
+
+def calculate_sma(df: pd.DataFrame, periods: list[int]) -> pd.DataFrame:
+    for p in periods:
+        df[f"SMA_{p}"] = df["Close"].rolling(window=p).mean()
+    return df
+
+
+def calculate_ema(df: pd.DataFrame, periods: list[int]) -> pd.DataFrame:
+    for p in periods:
+        df[f"EMA_{p}"] = df["Close"].ewm(span=p, adjust=False).mean()
+    return df
+
+
+def calculate_rsi(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+    delta = df["Close"].diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = gain / loss
+    df["RSI"] = 100 - (100 / (1 + rs))
+    return df
+
+
+def calculate_macd(df: pd.DataFrame, fast: int = 12, slow: int = 26, signal: int = 9) -> pd.DataFrame:
+    ema_fast = df["Close"].ewm(span=fast, adjust=False).mean()
+    ema_slow = df["Close"].ewm(span=slow, adjust=False).mean()
+    df["MACD"] = ema_fast - ema_slow
+    df["MACD_signal"] = df["MACD"].ewm(span=signal, adjust=False).mean()
+    return df
+
+
+def calculate_bollinger(df: pd.DataFrame, period: int = 20) -> pd.DataFrame:
+    ma = df["Close"].rolling(window=period).mean()
+    std = df["Close"].rolling(window=period).std()
+    df["Bollinger_Upper"] = ma + (2 * std)
+    df["Bollinger_Lower"] = ma - (2 * std)
+    return df
+
+
+def get_stock_data(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    sma_periods: list[int] = [20, 50],
+    ema_periods: list[int] = [20, 50],
+    rsi_period: int = 14,
+    macd_fast: int = 12,
+    macd_slow: int = 26,
+    macd_signal: int = 9,
+    bollinger_period: int = 20
+) -> pd.DataFrame | None:
+
+    df = yf.download(ticker, start=start_date, end=end_date, progress=False)
+    if df.empty:
+        return None
+
+    df = (
+        df.pipe(calculate_sma, sma_periods)
+          .pipe(calculate_ema, ema_periods)
+          .pipe(calculate_rsi, rsi_period)
+          .pipe(calculate_macd, macd_fast, macd_slow, macd_signal)
+          .pipe(calculate_bollinger, bollinger_period)
+          .dropna()
+    )
+
+    return df
